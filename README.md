@@ -1,48 +1,69 @@
-# Image Colorization (U-Net & pix2pix GAN)
+# Image Colorization with Deep Learning
 
-Two approaches to colorizing grayscale images. Both work in LAB color space — the model takes the lightness channel (`L`) and predicts the two color channels (`ab`), so it only has to learn color, not brightness.
+Two models that take a black and white image and predict its colors. One is a plain U-Net trained with MSE loss, the other wraps the same U-Net in a Pix2Pix style GAN. Both work on 128x128 images.
 
-- **`Colorization_Unet_Skip_Connection.ipynb`** — a U-Net with skip connections trained with MSE. Fast and stable, but colors come out a bit muted.
-- **`Colorization_GAN.ipynb`** — a pix2pix GAN using the same U-Net as generator with a PatchGAN discriminator, trained with L1 + adversarial loss. Slower, but gives more realistic, saturated colors.
+## The idea
 
-RGB↔LAB conversion is done on the GPU with `kornia`, and training uses mixed precision (`torch.amp`). Trained on a Colab T4 with the [Google Universal Image Embeddings 128×128](https://www.kaggle.com/datasets/rhtsingh/google-universal-image-embeddings-128x128) dataset.
+A grayscale image only carries brightness, no color. Instead of predicting full RGB, the models work in **LAB color space**:
 
-## Setup
+- **L** is the lightness. This is basically the grayscale image, and it's used as the input.
+- **A** and **B** hold the color. This is what the model has to predict.
 
-```bash
-pip install torch torchvision kornia kagglehub tqdm matplotlib pillow
-```
+So the network gets the L channel and learns to output the A and B channels, which are then combined back into a full color image. The RGB to LAB conversion happens on the GPU during training using `kornia`.
 
-## Pretrained weights
+## Two approaches
 
-Weights are on Google Drive (too big for GitHub):
+### 1. U-Net (`Colorization_Unet.ipynb`)
 
-- U-Net (MSE): [download](<https://drive.google.com/file/d/1wiRCWvc8ULv98Hj9cvdn8CXAqwB-1LBj/view?usp=sharing>)
-- pix2pix generator: [download](<https://drive.google.com/file/d/1jMIZwwHVoGPM17fV7jOvoQyd_xZdxx65/view?usp=sharing>)
+A standard encoder-decoder U-Net with skip connections. The encoder goes `1 → 64 → 128 → 256 → 512` channels, with a 1024 channel bottleneck in the middle, then the decoder mirrors it back up to a final 1x1 conv that outputs the 2 color channels. It's trained to match the real AB channels directly.
 
-## Inference
+- Loss: MSE
+- Optimizer: Adam, lr `1e-4`
+- 20 epochs, batch size 128, mixed precision
 
-```python
-import torch, kornia
-from PIL import Image
-from torchvision import transforms
+### 2. GAN (`Colorization_with_GAN.ipynb`)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = UNet().to(device)          # or UNet_Generator() for the GAN
-model.load_state_dict(torch.load("model.pth", map_location=device))
-model.eval()
+The same U-Net is used as the generator, plus a PatchGAN discriminator that looks at `(L, AB)` pairs and decides whether they look real or generated. This is the Pix2Pix setup.
 
-img = Image.open("input.jpg").convert("RGB")
-rgb = transforms.Compose([transforms.Resize((128, 128)), transforms.ToTensor()])(img).unsqueeze(0).to(device)
+- Generator loss: adversarial (BCE) + `100 × L1`
+- Discriminator loss: BCE
+- Optimizer: Adam, lr `2e-4`, betas `(0.5, 0.999)`
+- 9 epochs, batch size 64, mixed precision
 
-with torch.no_grad():
-    lab = kornia.color.rgb_to_lab(rgb)
-    L = lab[:, 0:1] / 100.0
-    pred_ab = model(L)
-    out_lab = torch.cat([L * 100.0, pred_ab * 128.0], dim=1)
-    out_rgb = kornia.color.lab_to_rgb(out_lab).clamp(0, 1)
-```
+## Dataset
 
-## Note
+[Google Universal Image Embeddings 128x128](https://www.kaggle.com/datasets/rhtsingh/google-universal-image-embeddings-128x128) (~130k images). It downloads automatically through `kagglehub` when you run the notebook. The data is split 90% train / 10% test.
 
-Colorization is ambiguous — a gray car could be any color — so the goal is plausible color, not exact recovery of the original.
+## Results
+
+The U-Net gives stable, natural looking colors, but they tend to come out a bit dull and washed out. That's expected with MSE, the model plays it safe and averages toward muted tones.
+
+The GAN produces brighter, more convincing colors, but it's less predictable. It sometimes picks the wrong color or looks slightly off, which comes from the usual GAN training instability.
+
+Short version: U-Net is safe but flat, GAN is vivid but riskier.
+
+![GAN colorization results](results_gan.png)
+
+*GAN output: grayscale input on top, colorized prediction below.*
+
+## Running it
+
+Both are notebooks, easiest to run on Colab or any machine with a GPU.
+
+1. Open either notebook.
+2. Run the cells top to bottom. The dataset downloads on its own.
+3. Training saves the best weights:
+   - U-Net → `best_colorization_model.pth`
+   - GAN → `pix2pix_generator.pth`
+4. The final cells show grayscale input, original, and colorized output side by side on a few test images.
+
+### Requirements
+
+`torch`, `torchvision`, `kornia`, `scikit-image`, `kagglehub`, `matplotlib`, `tqdm`
+
+Colab already has most of these. `kornia` is installed in the first cell of each notebook.
+
+## Files
+
+- `Colorization_Unet.ipynb` — U-Net model
+- `Colorization_with_GAN.ipynb` — Pix2Pix GANs — a gray car could be any color — so the goal is plausible color, not exact recovery of the original.
